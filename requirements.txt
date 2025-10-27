@@ -1,0 +1,4 @@
+torch
+gymnasium[box2d]
+numpy
+tensorboard
