@@ -1,94 +1,111 @@
-import gymnasium as gym
+"""
+model.py (Parallel Version)
+
+Defines the Actor-Critic network architecture for PPO.
+This version is compatible with the parallel training script.
+"""
+
 import torch
-import time
-import argparse
-import os
-
-from config_improved import Config
-from ppo_agent.model import ActorCritic
+import torch.nn as nn
+from torch.distributions.normal import Normal
+import numpy as np
 
 
-def main(args):
-    config = Config()
-    device = config.DEVICE
-    print(f"Using device: {device}")
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    """
+    Initializes weights and biases for a linear layer.
+    This helps stabilize training.
+    """
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
 
-    # Determine render mode (visual or recording)
-    render_mode = "human" if not args.record else "rgb_array"
 
-    env = gym.make(config.ENV_NAME, render_mode=render_mode)
+class ActorCritic(nn.Module):
+    def __init__(self, obs_dim, action_dim, hidden_dim):
+        """
+        Initializes the Actor (policy) and Critic (value) networks.
 
-    # Wrapper for video recording
-    if args.record:
-        os.makedirs(config.VIDEO_SAVE_DIR, exist_ok=True)
-        env = gym.wrappers.RecordVideo(
-            env,
-            config.VIDEO_SAVE_DIR,
-            episode_trigger=lambda e: e % 1 == 0,  # Record all episodes
-            name_prefix=f"eval-{args.model_path.split('/')[-1]}",
+        Args:
+            obs_dim (int): Dimension of the observation space.
+            action_dim (int): Dimension of the action space.
+            hidden_dim (int): Size of the hidden layers.
+        """
+        super().__init__()
+
+        # --- Critic Network ---
+        # Estimates the value of a state (V(s))
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, hidden_dim)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_dim, 1), std=1.0),  # Output is a single value
         )
 
-    # Initialize agent
-    obs_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
-    agent = ActorCritic(obs_dim, action_dim, config.HIDDEN_DIM).to(device)
+        # --- Actor Network ---
+        # Outputs the parameters for the action distribution (Policy)
+        self.actor_mean = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, hidden_dim)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.Tanh(),
+            layer_init(
+                nn.Linear(hidden_dim, action_dim), std=0.01
+            ),  # Output is the mean for each action
+        )
 
-    # Load the model
-    try:
-        agent.load_state_dict(torch.load(args.model_path, map_location=device))
-        print(f"Model loaded from {args.model_path}")
-    except FileNotFoundError:
-        print(f"Error: Model file not found at {args.model_path}")
-        print("Please train a model first with train.py")
-        env.close()
-        return
+        # We learn the log of the standard deviation (log_std)
+        # This is a common trick to ensure std is always positive
+        # We use nn.Parameter so that this tensor is part of the model's parameters to be optimized
+        self.actor_log_std = nn.Parameter(torch.zeros(1, action_dim))
 
-    agent.eval()  # Evaluation mode (no dropout, etc.)
+    def get_value(self, x):
+        """
+        Runs the critic network to get the state value.
+        Args:
+            x (torch.Tensor): Observations (state)
+        Returns:
+            torch.Tensor: The estimated value of the state(s).
+        """
+        return self.critic(x)
 
-    print("Starting evaluation...")
+    def get_action_and_value(self, x, action=None, deterministic=False):
+        """
+        Runs the actor and critic network.
 
-    for episode in range(args.episodes):
-        obs, _ = env.reset()
-        obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device)
-        done = False
-        total_reward = 0
+        Args:
+            x (torch.Tensor): Observations (state).
+            action (torch.Tensor, optional): If provided, computes log_prob for this action.
+            deterministic (bool, optional):
+                If True, returns the mean action (used for eval).
+                If False, samples from the distribution (used for training).
 
-        while not done:
-            with torch.no_grad():
-                # Use 'act' method in deterministic mode
-                action_tensor = agent.act(obs_tensor.unsqueeze(0), deterministic=True)
+        Returns:
+            tuple: (action, log_prob, entropy, value)
+        """
+        # Get action distribution parameters
+        action_mean = self.actor_mean(x)
+        action_log_std = self.actor_log_std.expand_as(
+            action_mean
+        )  # Make sure shape matches batch size
+        action_std = torch.exp(action_log_std)
 
-            action_np = action_tensor.cpu().numpy().squeeze()
-            obs, reward, terminated, truncated, _ = env.step(action_np)
-            done = terminated or truncated
+        # Create the probability distribution
+        probs = Normal(action_mean, action_std)
 
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device)
-            total_reward += reward
+        if deterministic:
+            # For evaluation, we don't sample, we take the best action (the mean)
+            action = action_mean
+        elif action is None:
+            # For training, we sample from the distribution
+            action = probs.sample()
 
-            if render_mode == "human":
-                time.sleep(1 / 60)  # Slow down for visualization
+        # Get log probability of the action and entropy of the distribution
+        log_prob = probs.log_prob(action).sum(dim=1)
+        entropy = probs.entropy().sum(dim=1)
 
-        print(f"Episode {episode + 1}/{args.episodes}, Reward: {total_reward:.2f}")
+        # Get state value from critic
+        value = self.critic(x)
 
-    env.close()
-    print("Evaluation finished.")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate a trained PPO agent.")
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default=Config().MODEL_SAVE_PATH,
-        help="Path to the saved model .pth file.",
-    )
-    parser.add_argument(
-        "--episodes", type=int, default=10, help="Number of episodes to evaluate."
-    )
-    parser.add_argument(
-        "--record",
-        action="store_true",
-        help="Record a video of the evaluation in the 'videos' folder.",
-    )
-    args = parser.parse_args()
-    main(args)
+        return action, log_prob, entropy, value
