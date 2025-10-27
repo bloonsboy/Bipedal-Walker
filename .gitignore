@@ -1,4 +1,4 @@
-__pycache__/
+__pycache__
 *.pyc
 *.pyo
 *.pyd
@@ -10,6 +10,7 @@ env/
 
 models/
 logs/
+videos/
 *.pth
 *.pt
 *.onnx

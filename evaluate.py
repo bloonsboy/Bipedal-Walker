@@ -4,7 +4,7 @@ import time
 import argparse
 import os
 
-from config import Config
+from config_improved import Config
 from ppo_agent.model import ActorCritic
 
 
