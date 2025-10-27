@@ -25,7 +25,7 @@ class Config:
         self.GAMMA = 0.99  # Discount factor
         self.GAE_LAMBDA = 0.95  # Lambda for GAE
         self.CLIP_EPSILON = 0.2  # Epsilon for PPO clipping
-        self.ENT_COEF = 0.01  # Entropy loss coefficient (exploration)
+        self.ENT_COEF = 0.02   # Entropy loss coefficient (exploration)
         self.VF_COEF = 0.5  # Value function loss coefficient
         self.MAX_GRAD_NORM = 0.5  # Gradient clipping
 

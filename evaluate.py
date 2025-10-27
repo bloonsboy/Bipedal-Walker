@@ -1,14 +1,3 @@
-"""
-evaluate.py
-
-Script to load a trained model and watch it play.
-You can also use this to record videos.
-
-Usage:
-    python evaluate.py
-    python evaluate.py --model_path="models/your_model.pth" --record
-"""
-
 import gymnasium as gym
 import torch
 import time
