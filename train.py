@@ -18,7 +18,8 @@ import random
 import os
 
 # Import local modules
-from config import Config
+from config_improved import Config
+# from config_simple import Config
 from ppo_agent.model import ActorCritic
 from ppo_agent.storage import RolloutBuffer
 
