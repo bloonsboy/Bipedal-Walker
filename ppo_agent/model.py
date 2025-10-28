@@ -1,17 +1,21 @@
 """
-model.py
+model.py (Parallel Version)
 
-Defines the neural network architecture for the Actor and Critic.
+Defines the Actor-Critic network architecture for PPO.
+This version is compatible with the parallel training script.
 """
 
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+from torch.distributions.normal import Normal
 import numpy as np
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    """Weight initialization (standard technique for PPO)."""
+    """
+    Initializes weights and biases for a linear layer.
+    This helps stabilize training.
+    """
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
@@ -19,70 +23,89 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_dim):
-        super(ActorCritic, self).__init__()
+        """
+        Initializes the Actor (policy) and Critic (value) networks.
 
-        # --- Critic Network (Value Network) ---
-        # Estimates V(s), the value of a state
+        Args:
+            obs_dim (int): Dimension of the observation space.
+            action_dim (int): Dimension of the action space.
+            hidden_dim (int): Size of the hidden layers.
+        """
+        super().__init__()
+
+        # --- Critic Network ---
+        # Estimates the value of a state (V(s))
         self.critic = nn.Sequential(
             layer_init(nn.Linear(obs_dim, hidden_dim)),
             nn.Tanh(),
             layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.Tanh(),
-            layer_init(nn.Linear(hidden_dim, 1), std=1.0),
+            layer_init(nn.Linear(hidden_dim, 1), std=1.0),  # Output is a single value
         )
 
-        # --- Actor Network (Policy Network) ---
-        # Predicts the mean of the actions
+        # --- Actor Network ---
+        # Outputs the parameters for the action distribution (Policy)
         self.actor_mean = nn.Sequential(
             layer_init(nn.Linear(obs_dim, hidden_dim)),
             nn.Tanh(),
             layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.Tanh(),
-            layer_init(nn.Linear(hidden_dim, action_dim), std=0.01),
+            layer_init(
+                nn.Linear(hidden_dim, action_dim), std=0.01
+            ),  # Output is the mean for each action
         )
 
-        # The standard deviation (std) is a learned parameter, independent of the state.
+        # We learn the log of the standard deviation (log_std)
+        # This is a common trick to ensure std is always positive
+        # We use nn.Parameter so that this tensor is part of the model's parameters to be optimized
         self.actor_log_std = nn.Parameter(torch.zeros(1, action_dim))
 
-    def get_value(self, obs):
-        """Returns the state value (V(s))."""
-        return self.critic(obs)
-
-    def get_action_and_value(self, obs, action=None):
+    def get_value(self, x):
         """
-        Calculates an action, its log_prob, the distribution's entropy
-        and the state value (V(s)).
+        Runs the critic network to get the state value.
+        Args:
+            x (torch.Tensor): Observations (state)
+        Returns:
+            torch.Tensor: The estimated value of the state(s).
         """
-        action_mean = self.actor_mean(obs)
+        return self.critic(x)
 
-        action_log_std = self.actor_log_std.expand_as(action_mean)
+    def get_action_and_value(self, x, action=None, deterministic=False):
+        """
+        Runs the actor and critic network.
+
+        Args:
+            x (torch.Tensor): Observations (state).
+            action (torch.Tensor, optional): If provided, computes log_prob for this action.
+            deterministic (bool, optional):
+                If True, returns the mean action (used for eval).
+                If False, samples from the distribution (used for training).
+
+        Returns:
+            tuple: (action, log_prob, entropy, value)
+        """
+        # Get action distribution parameters
+        action_mean = self.actor_mean(x)
+        action_log_std = self.actor_log_std.expand_as(
+            action_mean
+        )  # Make sure shape matches batch size
         action_std = torch.exp(action_log_std)
 
-        dist = Normal(action_mean, action_std)
-
-        if action is None:
-            action = dist.sample()
-
-        log_prob = dist.log_prob(action).sum(dim=-1)
-        value = self.critic(obs)
-        entropy = dist.entropy().sum(dim=-1)
-
-        return action, log_prob, entropy, value.view(-1)
-
-    def act(self, obs, deterministic=False):
-        """
-        Simplified action method for evaluation.
-        If deterministic, takes the mean. Otherwise, samples.
-        """
-        action_mean = self.actor_mean(obs)
+        # Create the probability distribution
+        probs = Normal(action_mean, action_std)
 
         if deterministic:
-            return action_mean
+            # For evaluation, we don't sample, we take the best action (the mean)
+            action = action_mean
+        elif action is None:
+            # For training, we sample from the distribution
+            action = probs.sample()
 
-        action_log_std = self.actor_log_std.expand_as(action_mean)
-        action_std = torch.exp(action_log_std)
+        # Get log probability of the action and entropy of the distribution
+        log_prob = probs.log_prob(action).sum(dim=1)
+        entropy = probs.entropy().sum(dim=1)
 
-        dist = Normal(action_mean, action_std)
-        action = dist.sample()
+        # Get state value from critic
+        value = self.critic(x)
 
-        return action
+        return action, log_prob, entropy, value
