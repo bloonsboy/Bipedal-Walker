@@ -1,8 +1,8 @@
-#2 Reinforcement Learning Project: Bipedal Walker with PPO
+# Reinforcement Learning Project: Bipedal Walker with PPO
 
 This repository contains an implementation of the PPO (Proximal Policy Optimization) algorithm to solve the "BipedalWalker-v3" environment from Gymnasium.
 
-#3 Project Structure
+### Project Structure
 
 config.py: Contains all hyperparameters for training.
 
@@ -24,7 +24,7 @@ videos/: Directory where evaluation videos are saved.
 
 requirements.txt: Python dependencies.
 
-#3 Installation
+### Installation
 
 Clone this repository and navigate into the directory.
 
@@ -32,7 +32,7 @@ Create a virtual environment and activate it:
 
 ```python
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+venv\Scripts\activate
 ```
 
 Install the dependencies:
@@ -41,7 +41,7 @@ Install the dependencies:
 pip install -r requirements.txt
 ```
 
-#3 Usage
+### Usage
 
 **1. Training**
 
