@@ -8,9 +8,6 @@ venv/
 env/
 .env/
 
-models/
-logs/
-videos/
 *.pth
 *.pt
 *.onnx

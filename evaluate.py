@@ -7,7 +7,7 @@ import numpy as np
 
 # Import local modules
 try:
-    from config import Config  # Import directly from config.py now
+    from config import Config # Import directly from config.py now
 except ImportError:
     print("Error: Could not import Config from config.py")
     print("Please ensure config.py exists.")
@@ -19,12 +19,8 @@ except ImportError:
     print("Error: Could not import ActorCritic from ppo_agent/model.py")
     exit()
 
-# REMOVED the problematic import of the reward wrapper - not needed for eval
-# try:
-#     from ppo_agent.reward_wrapper import HardcoreClimbingRewardWrapper
-# except ImportError:
-#     HardcoreClimbingRewardWrapper = None
-
+# Reward wrapper import is not needed for evaluation
+# We evaluate on the base environment rewards
 
 def main(args):
     config = Config()
@@ -48,19 +44,25 @@ def main(args):
     if args.record:
         video_folder = f"videos/eval_run_{os.path.basename(args.model_path).replace('.pth','')}_{int(time.time())}"
         os.makedirs(video_folder, exist_ok=True)
-        # Record only the first episode for simplicity during evaluation
+        # --- MODIFICATION: Record all episodes up to num_episodes ---
         env = gym.wrappers.RecordVideo(
             env,
             video_folder,
-            episode_trigger=lambda e: e == 0,
-            name_prefix=f"eval-{os.path.basename(args.model_path)}",
+            # This lambda now returns True for episode 0, 1, 2, 3, 4 (if num_episodes=5)
+            episode_trigger=lambda e: e < args.num_episodes,
+            name_prefix=f"eval-{os.path.basename(args.model_path)}"
         )
+        # --- END MODIFICATION ---
 
     obs_shape = env.observation_space.shape
     action_shape = env.action_space.shape
 
     # --- Load Agent ---
-    agent = ActorCritic(obs_shape[0], action_shape[0], config.HIDDEN_DIM).to(device)
+    agent = ActorCritic(
+        obs_shape[0],
+        action_shape[0],
+        config.HIDDEN_DIM
+    ).to(device)
 
     model_path = args.model_path
     if not os.path.exists(model_path):
@@ -81,22 +83,18 @@ def main(args):
     total_rewards = []
     try:
         for episode in range(args.num_episodes):
-            obs, info = env.reset(
-                seed=config.SEED + episode + 100
-            )  # Use different seed for eval
+            obs, info = env.reset(seed=config.SEED + episode + 100) # Use different seed for eval
             done = False
             episode_reward = 0
             step_count = 0
 
             while not done:
-                obs_tensor = (
-                    torch.tensor(obs, dtype=torch.float32).to(device).unsqueeze(0)
-                )
+                obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device).unsqueeze(0)
 
                 with torch.no_grad():
                     action_tensor, _, _, _ = agent.get_action_and_value(
                         obs_tensor,
-                        deterministic=True,  # Use deterministic actions for evaluation
+                        deterministic=True # Use deterministic actions for evaluation
                     )
 
                 action_np = action_tensor.squeeze(0).cpu().numpy()
@@ -107,61 +105,60 @@ def main(args):
                 step_count += 1
 
                 # Optional: Render if not recording
-                if not args.record:
-                    env.render()
-                    # Add a small delay to make visualization smoother
-                    # time.sleep(0.01)
+                # Note: Rendering significantly slows down evaluation
+                # if not args.record:
+                #    env.render()
+                #    # Add a small delay to make visualization smoother
+                #    # time.sleep(0.01)
 
-            print(
-                f"Episode {episode + 1}: Total Reward: {episode_reward:.2f}, Steps: {step_count}"
-            )
+
+            print(f"Episode {episode + 1}: Total Reward: {episode_reward:.2f}, Steps: {step_count}")
             total_rewards.append(episode_reward)
 
     except Exception as e:
         print(f"An error occurred during evaluation: {e}")
     finally:
-        env.close()
+        env.close() # Always close the environment
 
     # --- Print Results ---
     if total_rewards:
         print("\n--- Evaluation Summary ---")
-        print(
-            f"Average reward over {len(total_rewards)} episodes: {np.mean(total_rewards):.2f}"
-        )
+        print(f"Average reward over {len(total_rewards)} episodes: {np.mean(total_rewards):.2f}")
         print(f"Std dev of reward: {np.std(total_rewards):.2f}")
 
     if args.record:
-        print(f"\nVideo saved to the '{video_folder}' directory.")
-
+        print(f"\nVideos saved to the '{video_folder}' directory.")
 
 if __name__ == "__main__":
     try:
         # Try to get default path from config, provide fallback
         default_model_path = Config().SAVE_PATH
     except Exception:
-        default_model_path = (
-            "models/ppo_bipedal_walker_hardcore_finetuned_v2.pth"  # Fallback
-        )
+        default_model_path = "models/ppo_bipedal_walker_hardcore_finetuned_v2.pth" # Fallback
+
 
     parser = argparse.ArgumentParser(description="Evaluate a trained PPO agent")
     parser.add_argument(
         "--model-path",
         type=str,
         default=default_model_path,
-        help="Path to the saved model (.pth) file.",
+        help="Path to the saved model (.pth) file."
     )
     parser.add_argument(
         "--num-episodes",
         type=int,
-        default=5,
-        help="Number of episodes to run for evaluation.",
+        default=5, # Evaluate 5 episodes by default
+        help="Number of episodes to run for evaluation."
     )
     parser.add_argument(
-        "--record", action="store_true", help="Record a video of the first episode."
+        "--record",
+        action="store_true",
+        help="Record videos of the evaluation episodes."
     )
 
     try:
         args = parser.parse_args()
+        # Pass args to main to access args.num_episodes for trigger
         main(args)
     except SystemExit:
         pass
