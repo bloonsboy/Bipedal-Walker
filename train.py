@@ -11,7 +11,7 @@ import random
 import os
 
 try:
-    from config import Config  # Use the updated config file
+    from config import Config
 except ImportError:
     print("Error: Could not import Config from config.py")
     print("Please ensure config.py exists.")
@@ -29,11 +29,21 @@ except ImportError:
     print("Error: Could not import RolloutBuffer from ppo_agent/storage.py")
     exit()
 
+# --- MODIFICATION: Correctly import the specific wrapper ---
 try:
-    # Try importing the reward wrapper, but don't fail if it's not used
-    from ppo_agent.reward_wrapper import NaturalGaitRewardWrapper
+    # Attempt to import the specific class needed
+    from ppo_agent.reward_wrapper import HardcoreClimbingRewardWrapper
+
+    # Set a flag or variable to indicate success
+    RewardWrapperClass = HardcoreClimbingRewardWrapper
+    print("Successfully imported HardcoreClimbingRewardWrapper.")
 except ImportError:
-    NaturalGaitRewardWrapper = None  # Define as None if not found
+    # If import fails, set the flag/variable to None
+    RewardWrapperClass = None
+    print(
+        "Could not import HardcoreClimbingRewardWrapper. Reward shaping might not be applied if enabled."
+    )
+# --- END MODIFICATION ---
 
 
 def seed_everything(seed):
@@ -43,30 +53,34 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
 
 
+# --- MODIFICATION: Use the imported wrapper class ---
 def make_env(env_id, seed, use_reward_shaping, idx=0, capture_video=False, run_name=""):
     def thunk():
-        # Create base env
-        if capture_video and idx == 0:  # Only record the first env
+        if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id, render_mode=None)
 
-        # Apply custom reward wrapper if enabled and available
-        if use_reward_shaping and NaturalGaitRewardWrapper is not None:
-            print(f"Applying NaturalGaitRewardWrapper to env {idx}")
-            env = NaturalGaitRewardWrapper(env)
-        elif use_reward_shaping and NaturalGaitRewardWrapper is None:
+        # Apply custom reward wrapper ONLY if enabled AND the class was imported successfully
+        if use_reward_shaping and RewardWrapperClass is not None:
+            print(f"Applying {RewardWrapperClass.__name__} to env {idx}")
+            env = RewardWrapperClass(env)  # Use the imported class
+        elif use_reward_shaping and RewardWrapperClass is None:
+            # This warning should now only appear if the import truly failed
             print(
-                f"Warning: USE_REWARD_SHAPING is True but wrapper not found/imported."
+                f"Warning: USE_REWARD_SHAPING is True but wrapper class import failed."
             )
 
-        env = gym.wrappers.RecordEpisodeStatistics(env)  # Logs episodic returns
+        env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed + idx)
         env.observation_space.seed(seed + idx)
         return env
 
     return thunk
+
+
+# --- END MODIFICATION ---
 
 
 def main():
@@ -93,11 +107,12 @@ def main():
 
     seed_everything(config.SEED)
     device = config.DEVICE
-    print(f"Using device: {device}")
+    print(f"Using device: {device}")  # Still check this output!
 
     print(
         f"Initializing {config.NUM_ENVS} parallel environments for {config.ENV_NAME}..."
     )
+    # Pass the config flag directly to make_env
     envs = gym.vector.AsyncVectorEnv(
         [
             make_env(config.ENV_NAME, config.SEED, config.USE_REWARD_SHAPING, i)
@@ -122,9 +137,7 @@ def main():
         config.GAE_LAMBDA,
     )
 
-    # --- MODIFICATION: Load model logic ---
-    start_step = 0  # Initialize start_step
-    # Check if a specific LOAD_PATH is defined in the config
+    start_step = 0
     if (
         hasattr(config, "LOAD_PATH")
         and config.LOAD_PATH
@@ -133,69 +146,94 @@ def main():
         print(f"Loading model for fine-tuning from: {config.LOAD_PATH}")
         try:
             agent.load_state_dict(torch.load(config.LOAD_PATH, map_location=device))
-            # Optional: Extract step count if saved in filename or elsewhere
-            # start_step = extract_step_from_filename(config.LOAD_PATH)
             print("Model loaded successfully.")
+            # Basic step count assumption: if loading, assume previous training completed fully for LR schedule
+            # A more robust method would save/load step count with the model
+            try:
+                # Try to infer start step based on previous total timesteps if fine-tuning
+                # This logic assumes the LOAD_PATH model finished a run of TOTAL_TIMESTEPS defined previously
+                # It's an approximation for the LR scheduler.
+                # Example: If previous config had 5M steps, start_step = 5_000_000
+                # NOTE: This requires knowledge of the previous run's config or saving step count explicitly.
+                # For simplicity, we'll keep start_step = 0 for now, affecting only LR schedule start point.
+                # If you know the previous run finished at N steps, set start_step = N manually here.
+                print(
+                    f"Approximating start_step as 0 for LR scheduling. Adjust manually if needed."
+                )
+            except Exception:
+                print("Could not infer start step. Using 0.")
+                start_step = 0
+
         except Exception as e:
             print(f"Error loading model from LOAD_PATH: {e}. Starting from scratch.")
             start_step = 0
-    # Fallback: Check if the SAVE_PATH exists (for resuming interrupted training)
     elif os.path.exists(config.SAVE_PATH):
         print(f"Resuming training by loading model from: {config.SAVE_PATH}")
         try:
             agent.load_state_dict(torch.load(config.SAVE_PATH, map_location=device))
-            # Optional: Extract step count if resuming
-            # start_step = extract_step_from_filename(config.SAVE_PATH)
             print("Model loaded successfully.")
+            # Same approximation issue for start_step if resuming
+            start_step = 0  # Approximation
         except Exception as e:
             print(f"Error loading model from SAVE_PATH: {e}. Starting from scratch.")
             start_step = 0
     else:
         print("No existing model found. Starting training from scratch.")
         start_step = 0
-    # --- END MODIFICATION ---
 
     print("Starting training...")
     start_time = time.time()
     obs, _ = envs.reset(seed=config.SEED)
     obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device)
 
-    # Calculate total steps and updates needed, considering the start_step if resuming/fine-tuning
     total_steps_needed = config.TOTAL_TIMESTEPS
+    # Adjust remaining steps based on the (approximate) start_step
+    # Note: If start_step is 0, this runs for the full TOTAL_TIMESTEPS again
     remaining_steps = total_steps_needed - start_step
+    if remaining_steps <= 0:
+        print(
+            f"Target TOTAL_TIMESTEPS ({total_steps_needed}) already reached or exceeded by start_step ({start_step}). No training needed."
+        )
+        envs.close()
+        writer.close()
+        return
+
     num_updates = remaining_steps // config.BATCH_SIZE
-    start_update = (
-        start_step // config.BATCH_SIZE
-    ) + 1  # Calculate starting update number
+    start_update = (start_step // config.BATCH_SIZE) + 1
 
     print(f"Total target timesteps: {config.TOTAL_TIMESTEPS}")
-    print(f"Starting from step: {start_step}")
-    print(f"Remaining steps: {remaining_steps}")
+    print(f"Starting from step (approx): {start_step}")
+    print(f"Remaining steps to train: {remaining_steps}")
     print(f"Batch size (N_ENVS * N_STEPS): {config.BATCH_SIZE}")
     print(f"Total number of updates to run: {num_updates}")
     print(f"Starting from update: {start_update}")
 
     last_save_step = start_step
 
-    # Adjust the loop range
     for update in range(start_update, start_update + num_updates):
 
         if config.ANNEAL_LR:
-            # Adjust annealing based on the total number of updates planned FROM THE START
-            total_updates_from_start = config.TOTAL_TIMESTEPS // config.BATCH_SIZE
-            frac = 1.0 - (update - 1.0) / total_updates_from_start
-            lr_now = max(
-                frac * config.LEARNING_RATE, 1e-6
-            )  # Ensure lr doesn't go to zero
+            # Annealing should consider the TOTAL intended training duration (TOTAL_TIMESTEPS)
+            total_intended_updates = config.TOTAL_TIMESTEPS // config.BATCH_SIZE
+            # Calculate current progress fraction relative to the total intended training duration
+            frac = 1.0 - (update - 1.0) / total_intended_updates
+            # Ensure fraction doesn't go below zero if we run longer than initially planned
+            frac = max(frac, 0.0)
+            lr_now = frac * config.LEARNING_RATE
+            # Prevent LR from becoming exactly zero, set a minimum
+            lr_now = max(lr_now, 1e-6)
             optimizer.param_groups[0]["lr"] = lr_now
 
         buffer.reset()
-        current_rollout_start_time = time.time()  # Timer for rollout phase
+        current_rollout_start_time = time.time()
 
         for step in range(config.N_STEPS):
-            global_step = (update - 1) * config.BATCH_SIZE + step * config.NUM_ENVS
-            # Ensure global_step starts correctly if resuming
-            global_step = max(global_step, start_step + step * config.NUM_ENVS)
+            # Calculate accurate global_step based on update number and step within rollout
+            global_step = (
+                start_step
+                + (update - start_update) * config.BATCH_SIZE
+                + step * config.NUM_ENVS
+            )
 
             with torch.no_grad():
                 action, log_prob, _, value = agent.get_action_and_value(obs_tensor)
@@ -221,11 +259,10 @@ def main():
                 episode_rewards = info["episode"]["r"][finished_envs_mask]
                 episode_lengths = info["episode"]["l"][finished_envs_mask]
 
+                # Log stats for each finished episode
                 for i in range(len(episode_rewards)):
-                    # More accurate global step logging for episodes
-                    actual_global_step = (
-                        global_step + i
-                    )  # Approximate step when episode ended
+                    # Try to get a more accurate step count for episode end
+                    actual_global_step = global_step + i  # Approximation
                     print(
                         f"global_step={actual_global_step}, episode_reward={episode_rewards[i]:.2f}"
                     )
@@ -236,14 +273,19 @@ def main():
                         "charts/episodic_length", episode_lengths[i], actual_global_step
                     )
 
-            # Checkpoint saving logic
-            if (global_step - last_save_step) >= config.SAVE_FREQ:
-                print(f"Saving model checkpoint at step {global_step}...")
+            # Checkpoint saving logic based on accumulated steps
+            effective_steps_done = (
+                global_step + config.NUM_ENVS
+            )  # Steps done *after* this loop iteration
+            if (effective_steps_done - last_save_step) >= config.SAVE_FREQ:
+                current_save_step = (
+                    effective_steps_done // config.SAVE_FREQ
+                ) * config.SAVE_FREQ  # Align save step
+                print(f"Saving model checkpoint at step {current_save_step}...")
                 torch.save(agent.state_dict(), config.SAVE_PATH)
-                last_save_step = global_step
+                last_save_step = current_save_step
 
-        # --- Update Phase ---
-        update_start_time = time.time()  # Timer for update phase
+        update_start_time = time.time()
         with torch.no_grad():
             last_value = agent.get_value(obs_tensor)
             last_done = torch.tensor(done, dtype=torch.float32).to(device).unsqueeze(-1)
@@ -265,7 +307,7 @@ def main():
                 )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                new_value = new_value.view(-1)  # Ensure shape matches return_b
+                new_value = new_value.view(-1)
                 v_loss = F.mse_loss(new_value, return_b)
 
                 entropy_loss = -entropy.mean()
@@ -278,18 +320,13 @@ def main():
                 nn.utils.clip_grad_norm_(agent.parameters(), config.MAX_GRAD_NORM)
                 optimizer.step()
 
-        # --- Logging after update ---
         update_end_time = time.time()
         rollout_time = update_start_time - current_rollout_start_time
         update_time = update_end_time - update_start_time
         total_update_cycle_time = update_end_time - current_rollout_start_time
 
-        global_step_final = update * config.BATCH_SIZE
-        # Ensure final global step calculation is correct if resuming
-        global_step_final = max(
-            global_step_final,
-            start_step + config.BATCH_SIZE * (update - start_update + 1),
-        )
+        # Final global step for this update cycle
+        global_step_final = start_step + (update - start_update + 1) * config.BATCH_SIZE
 
         writer.add_scalar("losses/total_loss", loss.item(), global_step_final)
         writer.add_scalar("losses/pg_loss", pg_loss.item(), global_step_final)
@@ -299,8 +336,11 @@ def main():
             "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step_final
         )
 
-        # Calculate SPS based on the total time for one update cycle
-        sps = int(config.BATCH_SIZE / total_update_cycle_time)
+        sps = (
+            int(config.BATCH_SIZE / total_update_cycle_time)
+            if total_update_cycle_time > 0
+            else 0
+        )
         writer.add_scalar("charts/SPS", sps, global_step_final)
         print(
             f"Update {update}/{start_update + num_updates -1}, Global Step ~{global_step_final}, SPS: {sps}, Rollout: {rollout_time:.2f}s, Update: {update_time:.2f}s"
